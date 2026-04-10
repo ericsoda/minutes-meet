@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Minutes — grant microphone</title>
+    <style>
+      :root {
+        --bg: #0f1115;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --accent: #8ab4f8;
+        --accent-fg: #0f1115;
+        --danger: #f28b82;
+        --ok: #81c995;
+        --card: #181b21;
+        --border: #2a2d33;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        min-height: 100vh;
+      }
+      main {
+        max-width: 560px;
+        margin: 80px auto;
+        padding: 32px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      h1 { font-size: 22px; margin: 0 0 6px; }
+      p.sub { color: var(--muted); margin: 0 0 22px; }
+      button {
+        font: inherit;
+        background: var(--accent);
+        color: var(--accent-fg);
+        border: none;
+        border-radius: 6px;
+        padding: 12px 18px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { filter: brightness(1.07); }
+      .status {
+        margin-top: 22px;
+        padding: 14px 16px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .status.ok { border-color: var(--ok); color: var(--ok); }
+      .status.err { border-color: var(--danger); color: var(--danger); }
+      .hint { color: var(--muted); font-size: 12px; margin-top: 18px; line-height: 1.55; }
+      code { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Minutes — microphone access</h1>
+      <p class="sub">
+        Tab capture only records the OTHER participants. To record YOUR voice
+        too, the extension needs microphone access.
+      </p>
+
+      <button id="grant-btn">Grant microphone access</button>
+
+      <div id="status" class="status" hidden></div>
+
+      <p class="hint">
+        Chrome will show a permission prompt at the top of this tab. Click <b>Allow</b>.
+        Once granted, you can close this tab and click <b>Start recording</b> in the
+        Minutes popup.<br /><br />
+        If the prompt does not appear, your browser may have previously blocked it.
+        Open <code>chrome://settings/content/microphone</code>, find this extension,
+        and set it to <b>Allow</b>.
+      </p>
+    </main>
+    <script src="grant-mic.js"></script>
+  </body>
+</html>

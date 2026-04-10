@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Minutes",
+  "version": "0.1.0",
+  "description": "Local-only meeting notes for Google Meet. Records, transcribes with whisper.cpp on your machine, summarizes per participant with Claude.",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "scripting",
+    "storage",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Minutes"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

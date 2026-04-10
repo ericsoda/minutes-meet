@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Minutes</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Minutes</h1>
+      <div class="header-right">
+        <span id="status" class="status idle">idle</span>
+        <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <!-- Setup screen: shown on first run, or via the gear icon -->
+    <section id="setup-section" hidden>
+      <h2>Anthropic API key</h2>
+      <p class="hint">
+        Minutes needs your Anthropic API key for the per-participant summary.
+        Get one at
+        <a href="https://console.anthropic.com/settings/keys" target="_blank">console.anthropic.com</a>.
+      </p>
+      <input id="api-key-input" type="password" placeholder="sk-ant-api03-..." spellcheck="false" />
+      <div class="setup-actions">
+        <button id="save-key-btn" class="primary">Save &amp; verify</button>
+        <button id="cancel-setup-btn" hidden>Cancel</button>
+      </div>
+      <p id="setup-status" class="setup-status"></p>
+      <p class="hint" style="margin-top:14px">
+        The key is stored in Chrome's profile storage on this machine. It's
+        sent to the local helper as a request header for each meeting and never
+        written to disk.
+      </p>
+    </section>
+
+    <!-- Main control screen -->
+    <section id="control" hidden>
+      <button id="start-btn" class="primary">Start recording</button>
+      <button id="stop-btn" class="primary danger" hidden>Stop &amp; transcribe</button>
+      <p id="hint" class="hint"></p>
+    </section>
+
+    <section id="participants-section" hidden>
+      <h2>Participants</h2>
+      <p class="hint">Edit if names look wrong — Claude uses these for attribution.</p>
+      <textarea id="participants-edit" rows="4" placeholder="One name per line"></textarea>
+    </section>
+
+    <section id="result-section" hidden>
+      <div class="result-header">
+        <h2>Summary</h2>
+        <div class="actions">
+          <button id="copy-summary">Copy summary</button>
+          <button id="copy-transcript">Copy transcript</button>
+        </div>
+      </div>
+      <div id="summary-md" class="summary"></div>
+
+      <details>
+        <summary>Full transcript</summary>
+        <div id="transcript" class="transcript"></div>
+      </details>
+    </section>
+
+    <section id="error-section" hidden>
+      <h2>Something went wrong</h2>
+      <pre id="error-text"></pre>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
