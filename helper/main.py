@@ -1,10 +1,14 @@
 """
 Minutes — local helper.
 
-A small FastAPI server that the Chrome extension talks to. It accepts a finished
-meeting recording (audio + the list of participant names from the Meet UI),
-runs whisper.cpp locally to transcribe, then asks Claude to produce a
-per-participant summary (Claude attributes lines to speakers from context).
+A small FastAPI server that the Chrome extension talks to. The extension's
+offscreen document uploads the finished recording to /sessions/{id}/audio,
+then the service worker asks /sessions/{id}/process to transcribe with
+whisper.cpp and summarize per participant with Claude.
+
+The split matters for stability: once the audio is on disk, processing can be
+retried (helper restarted, whisper failed, Claude was down) without losing
+the recording.
 
 Audio never leaves the machine. The only outbound network call is to the
 Anthropic API for the summary.
@@ -26,7 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -45,15 +49,43 @@ FFMPEG_BIN = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Sessions created at Start but never uploaded to (user abandoned the meeting,
+# extension errored before stop) are just a meta.json. Sweep them on startup.
+ORPHAN_MAX_AGE_S = 24 * 3600
+
+
+def gc_orphaned_sessions() -> None:
+    now = time.time()
+    for d in DATA_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        meta_path = d / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        has_audio = any(d.glob("audio.*"))
+        if (
+            meta.get("status") == "open"
+            and not has_audio
+            and now - meta.get("created_at", now) > ORPHAN_MAX_AGE_S
+        ):
+            shutil.rmtree(d, ignore_errors=True)
+            print(f"[gc] removed orphaned session {d.name}", file=sys.stderr)
+
+
+gc_orphaned_sessions()
+
 # ---------- app ----------
 
-app = FastAPI(title="Minutes helper", version="0.1.0")
+app = FastAPI(title="Minutes helper", version="0.2.0")
 
-# The extension lives at chrome-extension://<id>/, a distinct origin.
-# This server only binds to 127.0.0.1, so allowing all origins is fine.
+# Only the extension may call us from a browser context. The server binds to
+# 127.0.0.1, but with allow_origins=["*"] any website the user visits could
+# read transcripts via fetch() — so restrict CORS to extension origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"chrome-extension://.*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,6 +103,14 @@ def write_json(path: Path, obj) -> None:
 
 def read_json(path: Path):
     return json.loads(path.read_text())
+
+
+def find_audio(sd: Path) -> Optional[Path]:
+    for ext in (".webm", ".ogg"):
+        p = sd / f"audio{ext}"
+        if p.exists():
+            return p
+    return None
 
 
 # ---------- transcription ----------
@@ -188,6 +228,10 @@ def normalize_whisper_segments(whisper_json: dict) -> list[dict]:
 
 
 # ---------- routes ----------
+#
+# Heavy endpoints are plain `def` on purpose: FastAPI runs them in a
+# threadpool, so a multi-minute whisper run doesn't freeze the event loop
+# (and /health) the way blocking inside `async def` would.
 
 
 @app.get("/health")
@@ -225,55 +269,70 @@ def test_key_route(req: TestKeyRequest):
     return {"ok": ok, "message": msg}
 
 
-@app.post("/sessions/{session_id}/finalize")
-async def finalize_session(
-    session_id: str,
-    audio: UploadFile = File(...),
-    participants: str = Form("[]"),
-    title: Optional[str] = Form(None),
-    x_anthropic_api_key: Optional[str] = Header(None, alias="X-Anthropic-Api-Key"),
-):
-    sd = session_dir(session_id)
+@app.post("/sessions/{session_id}/audio")
+def upload_audio(session_id: str, audio: UploadFile = File(...)):
+    """
+    Store the recording. Called by the extension's offscreen document as soon
+    as recording stops — before any processing — so the meeting is safe on
+    disk even if everything downstream fails.
+    """
+    sd = DATA_DIR / session_id
     meta_path = sd / "meta.json"
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail="session not found")
 
-    meta = read_json(meta_path)
-    meta["status"] = "processing"
-    meta["title"] = title or session_id
-    write_json(meta_path, meta)
-
-    # 1. save uploaded audio. The Blob's MIME type from MediaRecorder is usually
-    #    "audio/webm;codecs=opus" but the extension+round-trip can erase it; we
-    #    don't actually care, ffmpeg sniffs the format.
     ct = (audio.content_type or "").lower()
-    if "webm" in ct:
-        audio_ext = ".webm"
-    elif "ogg" in ct:
-        audio_ext = ".ogg"
-    else:
-        audio_ext = ".webm"  # default — MediaRecorder default is webm/opus
+    audio_ext = ".ogg" if "ogg" in ct else ".webm"  # MediaRecorder default is webm/opus
     audio_path = sd / f"audio{audio_ext}"
     with audio_path.open("wb") as f:
-        while chunk := await audio.read(1024 * 1024):
-            f.write(chunk)
+        shutil.copyfileobj(audio.file, f)
 
-    # 2. parse participants list (names from the Meet participants panel,
-    #    optionally edited by the user before clicking Stop)
-    try:
-        participants_list = json.loads(participants)
-        if not isinstance(participants_list, list):
-            raise ValueError("participants must be a JSON list of strings")
-    except (json.JSONDecodeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=f"invalid participants JSON: {e}")
-    write_json(sd / "participants.json", participants_list)
+    size = audio_path.stat().st_size
+    if size == 0:
+        audio_path.unlink()
+        raise HTTPException(status_code=400, detail="uploaded audio is empty")
 
+    meta = read_json(meta_path)
+    meta["status"] = "audio_uploaded"
+    meta["audio_bytes"] = size
+    write_json(meta_path, meta)
+    return {"ok": True, "bytes": size}
+
+
+class ProcessRequest(BaseModel):
+    participants: list[str] = []
+    title: Optional[str] = None
+
+
+@app.post("/sessions/{session_id}/process")
+def process_session(
+    session_id: str,
+    req: ProcessRequest,
+    x_anthropic_api_key: Optional[str] = Header(None, alias="X-Anthropic-Api-Key"),
+):
+    """
+    Transcribe + summarize from the audio already on disk. Safe to call again
+    after a failure — everything is rebuilt from audio.webm.
+    """
+    sd = DATA_DIR / session_id
+    meta_path = sd / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="session not found")
+    audio_path = find_audio(sd)
+    if audio_path is None:
+        raise HTTPException(status_code=409, detail="no audio uploaded for this session")
+
+    meta = read_json(meta_path)
+    meta["status"] = "processing"
+    meta["title"] = req.title or meta.get("title") or session_id
+    write_json(meta_path, meta)
+    write_json(sd / "participants.json", req.participants)
+
+    wav_path = sd / "audio.wav"
     try:
-        # 3. convert to wav
-        wav_path = sd / "audio.wav"
         convert_to_wav(audio_path, wav_path)
 
-        # 3a. silence guard — refuse to transcribe pure silence so whisper
+        # Silence guard — refuse to transcribe pure silence so whisper
         # can't hallucinate phrases into the output.
         volume = measure_volume(wav_path)
         write_json(sd / "volume.json", volume)
@@ -283,35 +342,33 @@ async def finalize_session(
         ):
             raise RuntimeError(silence_diagnostic(volume))
 
-        # 4. run whisper
-        whisper_out_prefix = sd / "whisper"
-        whisper_json = run_whisper(wav_path, whisper_out_prefix)
+        whisper_json = run_whisper(wav_path, sd / "whisper")
         segments = normalize_whisper_segments(whisper_json)
         write_json(sd / "segments.json", segments)
 
-        # 5. merge into reading-friendly blocks (no speaker labels yet — Claude attributes)
+        # Merge into reading-friendly blocks (no speaker labels — Claude attributes)
         blocks = segments_to_blocks(segments)
         write_json(sd / "transcript.json", blocks)
 
-        # 6. summarize with Claude. The key from the extension header takes
-        #    precedence; falls back to ANTHROPIC_API_KEY env var for CLI/dev use.
+        # The key from the extension header takes precedence; falls back to
+        # ANTHROPIC_API_KEY env var for CLI/dev use.
         summary_md = summarize_with_claude(
             blocks=blocks,
-            participants=participants_list,
+            participants=req.participants,
             title=meta["title"],
             api_key=x_anthropic_api_key,
         )
         (sd / "summary.md").write_text(summary_md)
 
         meta["status"] = "done"
-        meta["participants"] = participants_list
+        meta["participants"] = req.participants
         meta["finalized_at"] = time.time()
         write_json(meta_path, meta)
 
         return {
             "id": session_id,
             "title": meta["title"],
-            "participants": participants_list,
+            "participants": req.participants,
             "transcript": blocks,
             "summary_md": summary_md,
         }
@@ -320,6 +377,10 @@ async def finalize_session(
         meta["error"] = str(e)
         write_json(meta_path, meta)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # The wav is a ~90 MB/meeting intermediate, always recreatable from
+        # the original webm — never keep it.
+        wav_path.unlink(missing_ok=True)
 
 
 @app.get("/sessions/{session_id}")

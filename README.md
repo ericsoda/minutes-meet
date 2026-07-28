@@ -110,7 +110,6 @@ Each session lands in `data/<timestamp>-<id>/`:
 | File | Contents |
 |------|----------|
 | `audio.webm` | Original captured audio (mic + tab, mixed) |
-| `audio.wav` | 16 kHz mono WAV used by whisper |
 | `whisper.json` | Raw whisper.cpp output |
 | `segments.json` | Normalized whisper segments |
 | `transcript.json` | Merged reading-friendly blocks |
@@ -120,6 +119,8 @@ Each session lands in `data/<timestamp>-<id>/`:
 | `meta.json` | Session metadata |
 
 The popup shows the summary and the transcript and gives you copy buttons. If you want anything else, pull it from `data/<id>/`.
+
+The intermediate 16 kHz WAV that whisper reads (~90 MB per meeting) is deleted after processing — it's always recreatable from `audio.webm`. Sessions that were started but never recorded into are garbage-collected after a day.
 
 ## Troubleshooting
 
@@ -137,6 +138,12 @@ The offscreen recorder re-routes captured tab audio back through an `AudioContex
 
 **Whisper produces "Thank you" or "Thanks for watching" as the entire transcript.**
 This is whisper hallucinating on silent audio (a known YouTube training-data artifact). The helper has a silence guard that should catch this and return a clear error instead. If you see this happen anyway, file an issue with the contents of `data/<id>/volume.json`.
+
+**Transcription or the summary failed after the meeting.**
+The recording itself is already safe on disk — the audio is uploaded to the helper *before* any processing starts. Fix whatever broke (helper down, Claude outage, bad key) and click **Retry processing** in the popup. Nothing is lost.
+
+**I closed the Meet tab before clicking Stop.**
+Also fine. The recorder finalizes the audio the moment the tab closes; click **Stop & transcribe** whenever and you'll get everything up to that point.
 
 ## Architecture
 
@@ -168,6 +175,7 @@ This is whisper hallucinating on silent audio (a known YouTube training-data art
 - **Claude does speaker attribution from context**, not DOM-based active-speaker tracking. The DOM approach is fragile — Meet ships UI changes that break selectors. Claude is excellent at attributing lines using name cues that appear naturally in real status meetings ("Alice, your turn"). The participant-name scraper only needs to identify *who's in the meeting*, which is a much more stable surface.
 - **Per-participant sections that stand alone** because the original problem is that existing tools bury individual updates inside walls of generic "AI insights." Each section here is something a person could lift directly as their own status update.
 - **API key in `chrome.storage.local`, sent per-request** so the helper never persists secrets to disk.
+- **Audio uploads before processing starts.** The offscreen recorder POSTs the blob straight to the helper the moment recording stops (routing it through the service worker as a message would hit Chrome's ~64 MB limit on long meetings). Once it's on disk, transcription and summarization are a separate, retryable step.
 
 ## Cost
 

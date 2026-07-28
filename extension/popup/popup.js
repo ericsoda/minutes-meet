@@ -28,6 +28,8 @@ const els = {
 
   errorSection: document.getElementById("error-section"),
   errorText: document.getElementById("error-text"),
+  retryBtn: document.getElementById("retry-btn"),
+  retryHint: document.getElementById("retry-hint"),
 };
 
 function setStatus(label, cls) {
@@ -35,13 +37,17 @@ function setStatus(label, cls) {
   els.status.className = "status " + cls;
 }
 
-function showError(msg) {
+function showError(msg, { canRetry = false } = {}) {
   els.errorSection.hidden = false;
   els.errorText.textContent = msg;
+  els.retryBtn.hidden = !canRetry;
+  els.retryHint.hidden = !canRetry;
 }
 function clearError() {
   els.errorSection.hidden = true;
   els.errorText.textContent = "";
+  els.retryBtn.hidden = true;
+  els.retryHint.hidden = true;
 }
 
 function formatTs(ms) {
@@ -112,6 +118,18 @@ async function ensureMicPermission() {
 
 // ---------- main render ----------
 
+// While the helper is transcribing, the popup may be closed and reopened —
+// poll so the view flips to "done" without user interaction.
+let processingPoll = null;
+function setProcessingPoll(active) {
+  if (active && !processingPoll) {
+    processingPoll = setInterval(refreshState, 2000);
+  } else if (!active && processingPoll) {
+    clearInterval(processingPoll);
+    processingPoll = null;
+  }
+}
+
 async function refreshState() {
   const storedKey = await getStoredApiKey();
   if (!storedKey) {
@@ -124,15 +142,26 @@ async function refreshState() {
 
   const resp = await chrome.runtime.sendMessage({ type: "minutes:popup:getState" });
   const state = resp?.state || {};
+  setProcessingPoll(state.phase === "processing");
 
-  if (state.recording) {
+  if (state.phase === "recording") {
     setStatus("recording", "recording");
     els.startBtn.hidden = true;
     els.stopBtn.hidden = false;
+    els.stopBtn.disabled = false;
     els.hint.textContent =
       "Recording the active Meet tab. You can close this popup — recording continues.";
     els.participantsSection.hidden = false;
     els.participantsEdit.value = (state.participants || []).join("\n");
+    els.resultSection.hidden = true;
+  } else if (state.phase === "processing") {
+    setStatus("processing", "processing");
+    els.startBtn.hidden = true;
+    els.stopBtn.hidden = true;
+    els.hint.textContent =
+      "Transcribing locally with whisper.cpp, then asking Claude for the summary. " +
+      "You can close this popup — the result will be here when it's done.";
+    els.participantsSection.hidden = true;
     els.resultSection.hidden = true;
   } else if (state.lastResult) {
     setStatus("done", "done");
@@ -153,7 +182,11 @@ async function refreshState() {
     els.resultSection.hidden = true;
   }
 
-  if (state.lastError) showError(state.lastError);
+  if (state.lastError && state.phase !== "processing") {
+    showError(state.lastError, { canRetry: !!state.canRetry });
+  } else {
+    clearError();
+  }
 }
 
 // ---------- handlers ----------
@@ -237,18 +270,18 @@ els.stopBtn.addEventListener("click", async () => {
     participants: edited,
   });
 
-  setStatus("processing", "processing");
+  // Processing takes minutes — don't block the UI on the response. The
+  // worker flips to "processing" almost immediately; the poll picks up the
+  // finished result (or the error) from state.
   els.stopBtn.disabled = true;
-  els.hint.textContent = "Transcribing locally with whisper.cpp, then asking Claude for the summary…";
+  chrome.runtime.sendMessage({ type: "minutes:popup:stop" }).finally(refreshState);
+  setTimeout(refreshState, 400);
+});
 
-  const resp = await chrome.runtime.sendMessage({ type: "minutes:popup:stop" });
-  els.stopBtn.disabled = false;
-  if (!resp?.ok) {
-    showError(resp?.error || "failed to stop");
-    setStatus("idle", "idle");
-    return;
-  }
-  await refreshState();
+els.retryBtn.addEventListener("click", () => {
+  clearError();
+  chrome.runtime.sendMessage({ type: "minutes:popup:retry" }).finally(refreshState);
+  setTimeout(refreshState, 400);
 });
 
 els.copySummary.addEventListener("click", async () => {

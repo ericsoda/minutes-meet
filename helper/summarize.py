@@ -12,7 +12,7 @@ import os
 
 from anthropic import Anthropic
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-sonnet-5"
 
 
 SYSTEM_PROMPT = """\
@@ -107,10 +107,16 @@ def summarize_with_claude(
     client = Anthropic(api_key=key)
     response = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "Claude hit the output token limit mid-summary — the summary would "
+            "be truncated. This meeting is unusually long; raise max_tokens in "
+            "summarize.py and retry processing."
+        )
     for block in response.content:
         if getattr(block, "type", None) == "text":
             return block.text

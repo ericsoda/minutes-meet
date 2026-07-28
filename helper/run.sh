@@ -19,10 +19,10 @@ if [ ! -d ".venv" ]; then
   ./.venv/bin/pip install -r requirements.txt
 fi
 
+# The API key normally comes from the extension popup per-request; the env
+# var is only a fallback for CLI/dev use, so its absence is not an error.
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "[minutes] ERROR: ANTHROPIC_API_KEY is not set."
-  echo "  export ANTHROPIC_API_KEY=sk-ant-..."
-  exit 1
+  echo "[minutes] note: ANTHROPIC_API_KEY not set — using the key from the extension popup."
 fi
 
 exec ./.venv/bin/python main.py

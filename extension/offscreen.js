@@ -16,11 +16,19 @@
 // while it's capturing. We re-route ONLY the tab stream back to speakers
 // through an AudioContext so the meeting stays audible. We do NOT route the
 // mic to speakers — that would create echo (you hearing yourself).
+//
+// On stop, the recording is POSTed straight from here to the local helper.
+// Routing the blob through the service worker as a base64 message would hit
+// Chrome's ~64 MB message limit on long meetings (a 50-minute meeting is
+// already there) and lose the recording.
+
+const HELPER_BASE = "http://127.0.0.1:8765";
 
 let tabStream = null;
 let micStream = null;
 let audioCtx = null;
 let mediaRecorder = null;
+let recorderStopped = null; // promise resolved when the recorder fully stops
 let chunks = [];
 let mimeType = "audio/webm";
 let warnings = [];
@@ -111,31 +119,36 @@ async function start(streamId) {
   mediaRecorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) chunks.push(e.data);
   };
-  mediaRecorder.start(1000);
-}
-
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result;
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+  recorderStopped = new Promise((resolve) => {
+    mediaRecorder.onstop = () => resolve();
   });
+  mediaRecorder.start(1000);
+
+  // If the Meet tab is closed mid-meeting (people do this the moment the call
+  // ends), the capture track ends and the recorder would sit inactive with
+  // its chunks in limbo. Stop it cleanly so the audio up to that point
+  // survives until the user clicks Stop & transcribe.
+  const tabTrack = tabStream.getAudioTracks()[0];
+  if (tabTrack) {
+    tabTrack.addEventListener("ended", () => {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        warnings.push("Meet tab was closed — recording captured up to that point.");
+        mediaRecorder.stop();
+      }
+    });
+  }
 }
 
-async function stop() {
+async function stop(sessionId) {
   if (!mediaRecorder) {
     throw new Error("recorder is not running");
   }
-  const finished = new Promise((resolve) => {
-    mediaRecorder.onstop = () => resolve();
-  });
-  mediaRecorder.stop();
-  await finished;
+  // The recorder may have already stopped itself (tab closed) — only ask it
+  // to stop if it's still going, then wait for the final chunk either way.
+  if (mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+  await recorderStopped;
 
   // Tear down all streams and audio context.
   if (tabStream) for (const t of tabStream.getTracks()) t.stop();
@@ -148,14 +161,26 @@ async function stop() {
   const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
   chunks = [];
   mediaRecorder = null;
+  recorderStopped = null;
 
-  const audioBase64 = await blobToBase64(blob);
-  return {
-    audioBase64,
-    mimeType: mimeType || "audio/webm",
-    byteLength: blob.size,
-    warnings,
-  };
+  if (blob.size === 0) {
+    throw new Error("recording produced no audio data");
+  }
+
+  // Upload directly to the helper so the meeting is safe on disk before any
+  // processing happens.
+  const fd = new FormData();
+  fd.append("audio", blob, "audio.webm");
+  const r = await fetch(`${HELPER_BASE}/sessions/${sessionId}/audio`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(`audio upload failed: ${r.status} ${txt}`);
+  }
+
+  return { byteLength: blob.size, warnings };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -169,7 +194,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "minutes:offscreen:stop") {
-    stop()
+    stop(msg.sessionId)
       .then((res) => sendResponse({ ok: true, ...res }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
